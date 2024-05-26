@@ -3,7 +3,6 @@
 # Shell variables and functions used by the installation and upgrade scripts.
 # This file is "source"d into others, and must be done AFTER source'ing variables.sh.
 
-
 ######################################### variables
 
 # export to keep shellcheck quiet
@@ -309,10 +308,10 @@ function check_remote_server()
 			return 2
 			;;
 
-		ftp | ftps | sftp | scp)
+		ftp | ftps | sftp | scp | rsync)
 			check_PROTOCOL "${PROTOCOL}" "${TYPE}_HOST" "${sTYPE}" "Server Name" || RET=1
 			check_PROTOCOL "${PROTOCOL}" "${TYPE}_USER" "${sTYPE}" "User Name" || RET=1
-			if [[ ${PROTOCOL} == "scp" ]]; then
+			if [[ ${PROTOCOL} == "scp" || ${PROTOCOL} == "rsync" ]]; then
 				if check_PROTOCOL "${PROTOCOL}" "${TYPE}_SSH_KEY_FILE" "SSH Key File" "${sTYPE}" \
 						&& [[ ! -e ${SSH_KEY_FILE} ]]; then
 					echo -n "${sTYPE} Protocol (${PROTOCOL}) set but '${TYPE}_SSH_KEY_FILE'"
@@ -349,7 +348,7 @@ function check_remote_server()
 
 		*)
 			echo -n "${sTYPE} Protocol (${PROTOCOL}) is not blank or one of:"
-			echo    " ftp, ftps, sftp, scp, s3, gcs."
+			echo    " ftp, ftps, sftp, scp, rsync, s3, gcs."
 			echo    "${CORRECTED}"
 			echo    "FIX: Use a valid protocol."
 			RET=1
@@ -402,25 +401,33 @@ function update_json_file()		# [-d] field, new value, file, [type]
 	else
 		NEW_VALUE="${2}"
 		TYPE="${4}"
-		# Numbers and booleans don't need quotes.
-		if [[ -z ${TYPE} && ${NEW_VALUE} != "true" && ${NEW_VALUE} != "false" ]] &&
-			! is_number "${NEW_VALUE}" ; then
-				TYPE="text"
-		fi
-		if [[ ${TYPE} == "text" ]]; then
-			DOUBLE_QUOTE='"'
-		else
+
+		DOUBLE_QUOTE='"'
+
+		if [[ -n ${TYPE} ]]; then
+			# These don't need quotes.
+			if [[ ${TYPE} == "boolean" || ${TYPE} == "percent" ||
+				  ${TYPE} == "integer" || ${TYPE} == "float" ]]; then
+				DOUBLE_QUOTE=""
+			fi
+
+			# If the TYPE wasn't passed to us, do our best to determine if
+			# it's a boolean or number.
+		elif [[ ${NEW_VALUE} == "true" || ${NEW_VALUE} == "false" ]] ||
+				is_number "${NEW_VALUE}" ; then
 			DOUBLE_QUOTE=""
 		fi
 		ACTION="${FIELD} = ${DOUBLE_QUOTE}${NEW_VALUE}${DOUBLE_QUOTE}"
 	fi
+
 	ERR_MSG="$( jq --indent 4 "${ACTION}" "${FILE}" 2>&1 > "${TEMP}" )"
 	RET=$?
 	if [[ ${RET} -eq 0 ]]; then
 		# Have to use "cp" instead of "mv" to keep any hard link.
 		cp "${TEMP}" "${FILE}"
 	else
-		echo "${M}: Unable to update json value of '${FIELD}' to '${NEW_VALUE}' in '${FILE}': ${ERR_MSG}" >&2
+		MSG="Unable to [$ACTION] json value of '${FIELD}' to '${NEW_VALUE}' in '${FILE}': ${ERR_MSG}"
+		echo "${M}: ${MSG}" >&2
 	fi
 	rm "${TEMP}"
 
@@ -674,10 +681,10 @@ function check_tmp()
 	fi
 
 	SIZE=75		# MB - should be enough
-	MSG="Making ${ALLSKY_TMP} reside in memory can drastically decrease the amount"
-	MSG+=" of writes to the SD card, increasing its life."
-	MSG+="\n\nDo you want to make it reside in memory?"
-	MSG+="\n\nNote: anything in it will be deleted whenever the Pi is rebooted,"
+	MSG="Putting the ${ALLSKY_TMP} director and its contents into memory drastically"
+	MSG+=" decreases the number of writes to the SD card, increasing its life."
+	MSG+="\n\nDo you want to do this?"
+	MSG+="\n\nNote: anything in that directory will be deleted whenever the Pi is rebooted,"
 	MSG+=" but that's not an issue since the directory only contains temporary files."
 	if whiptail --title "${TITLE}" --yesno "${MSG}" 15 "${WT_WIDTH}"  3>&1 1>&2 2>&3; then
 		STRING="${INITIAL_FSTAB_STRING} size=${SIZE}M,noatime,lazytime,nodev,"
@@ -689,7 +696,8 @@ function check_tmp()
 		check_and_mount_tmp
 		display_msg --log progress "${ALLSKY_TMP} is now in memory."
 	else
-		display_msg --log info "${ALLSKY_TMP} will remain on disk."
+		MSG="The ${ALLSKY_TMP} directory and its contnts will remain on the SD card."
+		display_msg --log info "${MSG}"
 		mkdir -p "${ALLSKY_TMP}"
 	fi
 
@@ -734,76 +742,87 @@ function prompt_for_lat_long()
 }
 
 ####
-# We can't automatically determine the latitude and longitude, so prompt for them.
+# Try to 't automatically determine the latitude and longitude.
+# If we can't prompt for them.
 function get_lat_long()
 {
 	# Global: SETTINGS_FILE
-	local MSG  LATITUDE  LONGITUDE
+	local MSG  LATITUDE  LAT  LONGITUDE  LON  RAW_LOCATION  MY_LOCATION_PARTS  ERR  X
 
 	if [[ ! -f ${SETTINGS_FILE} ]]; then
 		display_msg --log error "INTERNAL ERROR: '${SETTINGS_FILE}' not found!"
 		return 1
 	fi
 
-    LAT=""
-    LON=""
+	LAT=""
+	LON=""
 	# Check we have an internect connection
-    if [[ $(wget -q --spider "http://google.com") -eq 0 ]]; then
-
-		# Use ipinfo.io to get the users lat and lon from their ip
-        RAW_LOCATION="$(curl -s ipinfo.io/loc 2>/dev/null)"
-
-		# If we got a json response then its an error
-        if jq -e . >/dev/null 2>&1 <<<"$RAW_LOCATION"; then
-			display_msg --log progress "Got error response trying to get latitude and longitude from ip address"
-        else
+	if wget -q --spider "http://www.google.com" ; then
+		# Use ipinfo.io to get the user's lat and lon from their IP.
+		RAW_LOCATION="$( curl -s ipinfo.io/loc 2>/dev/null )"
+		# If we got a json response then it's an error.
+		# If "jq" fails we did NOT get json response.
+		if ERR="$( jq -e . 2>&1 <<<"${RAW_LOCATION}" )"; then
+			MSG="Got error response trying to get latitude and longitude from ip address:"
+			MSG+="\n${ERR}"
+			display_msg --logonly info "${MSG}"
+		else
 			# Lat and Lon are returned as a comma separated string i.e. 52.1234,0.3123
-            # shellcheck disable=SC2207
-            MY_LOCATION_PARTS=($(echo "$RAW_LOCATION" | tr "," "\n"))
-            if [[ ${#MY_LOCATION_PARTS[@]} = 2 ]]; then
+			# Setting an array variable needs the items to be space-separated.
+			# shellcheck disable=SC2206
+			MY_LOCATION_PARTS=( ${RAW_LOCATION/,/ } )
+			if [[ ${#MY_LOCATION_PARTS[@]} -eq 2 ]]; then
 
-                LAT=${MY_LOCATION_PARTS[0]}
-                LON=${MY_LOCATION_PARTS[1]}
+				LAT="${MY_LOCATION_PARTS[0]}"
+				LON="${MY_LOCATION_PARTS[1]}"
 
-                if [[ $(echo "${LAT} > 0" |bc -l) -eq 1 ]]; then 
-                    LAT=${LAT}N
-                else
-					LAT="${LAT//-/}"
-                    LAT=${LAT}S
-                fi
-                
-                if [[ $(echo "$LON > 0" |bc -l) -eq 1 ]]; then 
-                    LON=${LON}E
-                else
-					LON="${LON//-/}"
-                    LON=${LON}W
-                fi
-            fi		
-        fi
-    else
-        display_msg --log progress "No internet connection detected skipping geolocation"
-    fi
-	
-	display_msg --log progress "Prompting for Latitude and Longitude."
-	MSG="Enter your Latitude."
-	MSG+="\nIt can either have a plus or minus sign (e.g., -20.1)"
-	MSG+="\nor N or S (e.g., 20.1S)"
-	if [[ -n ${LAT} ]]; then
-		MSG+="\n\nWe have defaulted your approximate location using your IP Address"
+				if [[ $( echo "${LAT} > 0" | bc ) -eq 1 ]] ; then
+					LAT="${LAT}N"
+				else
+					LAT="${LAT//-/}S"
+				fi
+
+				if [[ $( echo "$LON > 0" | bc ) -eq 1 ]] ; then
+					LON="${LON}E"
+				else
+					LON="${LON//-/}W"
+				fi
+			else
+				display_msg --logonly info "'${RAW_LOCATION}' did not have two fields."
+			fi
+		fi
+	else
+		display_msg --logonly info "No internet connection detected; skipping geolocation."
 	fi
-	LATITUDE="$( prompt_for_lat_long "${MSG}" "latitude" "Latitude" "${LAT}")"
 
-	MSG="Enter your Longitude."
+	if [[ -z ${LAT} ]]; then
+		MSG="Prompting for Latitude and Longitude."
+		X="Enter"
+	else
+		MSG="Verifying pre-determined Latitude and Longitude."
+		X="Verify"
+	fi
+	display_msg --log progress "${MSG}"
+	MSG="${X} your Latitude."
+	MSG+="\nIt can either have a plus or minus sign (e.g., -20.1)"
+	MSG+="\nor N or S (e.g., 20.1N)"
+	if [[ -n ${LAT} ]]; then
+		MSG+="\n\n*** Your approximate Latitude using your IP Address is below. ***"
+	fi
+	LATITUDE="$( prompt_for_lat_long "${MSG}" "latitude" "Latitude" "${LAT}" )"
+
+	MSG="${X} your Longitude."
 	MSG+="\nIt can either have a plus or minus sign (e.g., -20.1)"
 	MSG+="\nor E or W (e.g., 20.1W)"
 	if [[ -n ${LON} ]]; then
-		MSG+="\n\nWe have defaulted your approximate location using your IP Address"
+		MSG+="\n\n*** Your approximate Longitude using your IP Address is below. ***"
 	fi
-	LONGITUDE="$( prompt_for_lat_long "${MSG}" "longitude" "Longitude" "${LON}")"
+	LONGITUDE="$( prompt_for_lat_long "${MSG}" "longitude" "Longitude" "${LON}" )"
 
 	if [[ -z ${LATITUDE} || -z ${LONGITUDE} ]]; then
 		MSG="Latitude and Longitude need to be set in the WebUI before Allsky can start."
 		display_msg --log warning "${MSG}"
+		return 1
 	fi
 	return 0
 }
@@ -836,3 +855,4 @@ function get_computer()
 	local GB="$( get_RAM )"
 	echo "${MODEL}, ${GB} GB"
 }
+

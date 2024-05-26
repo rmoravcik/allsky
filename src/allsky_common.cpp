@@ -16,6 +16,7 @@
 #include <fstream>
 #include <stdarg.h>
 #include <sys/types.h>
+#include <typeinfo>
 #include <sys/wait.h>
 #include <stdio.h>
 #include <fcntl.h>
@@ -1375,9 +1376,17 @@ void delayBetweenImages(config cg, long lastExposure_us, std::string sleepType)
 // NULL-out CR or LF, or both if they are in a row.
 // Keep track of the beginning of the next line.
 // Return a pointer to the beginning of the line or NULL if at the end of the file.
+
+// Calling getLine(NULL) resets the pointer so the next call
+// starts at the beginning of the buffer
 char *getLine(char *buffer)
 {
 	static char *nextLine = NULL;
+	if (buffer == NULL)
+	{
+		nextLine = NULL;
+		return(NULL);
+	}
 	char *startOfLine;
 	char *ptr;
 
@@ -1409,9 +1418,47 @@ char *getLine(char *buffer)
 	return(startOfLine);
 }
 
+// Read the specified file into the specified buffer.
+char * readFileIntoBuffer(config *cg, const char *file)
+{
+	int fd;
+	if ((fd = open(file, O_RDONLY)) == -1)
+	{
+		int e = errno;
+		Log(0, "*** %s: ERROR: Could not open file '%s': %s!", cg->ME, file, strerror(e));
+		return NULL;
+	}
+	struct stat statbuf;
+	if (fstat(fd, &statbuf) == 1)		// This should never fail
+	{
+		int e = errno;
+		Log(0, "*** %s: ERROR: Could not fstat() file '%s': %s!", cg->ME, file, strerror(e));
+		return NULL;
+	}
+	// + 1 for trailing NULL
+	char *buf = NULL;
+	if ((buf = (char *) realloc(buf, statbuf.st_size + 1)) == NULL)
+	{
+		int e = errno;
+		Log(0, "*** %s: ERROR: Could not realloc() file '%s': %s!", cg->ME, file, strerror(e));
+		return NULL;
+	}
+	if (read(fd, buf, statbuf.st_size) != statbuf.st_size)
+	{
+		int e = errno;
+		Log(0, "*** %s: ERROR: Could not read() file '%s': %s!", cg->ME, file, strerror(e));
+		return NULL;
+	}
+
+	buf[statbuf.st_size] = '\0';
+	(void) close(fd);
+
+	return(buf);
+}
+
 // Get settings from a configuration file.
 bool called_from_getConfigFileArguments = false;
-static bool getConfigFileArguments(config *cg)
+bool getConfigFileArguments(config *cg)
 {
 	if (called_from_getConfigFileArguments)
 	{
@@ -1424,41 +1471,10 @@ static bool getConfigFileArguments(config *cg)
 		return false;
 	}
 
-	// Read the whole configuration file into memory so we can create argv with pointers
-	static char *buf = NULL;
-	int fd;
-	if ((fd = open(cg->configFile, O_RDONLY)) == -1)
-	{
-		int e = errno;
-		Log(0, "*** %s: ERROR: Could not open configuration file '%s': %s!",
-			cg->ME, cg->configFile, strerror(e));
-		return false;
-	}
-	struct stat statbuf;
-	if (fstat(fd, &statbuf) == 1)		// This should never fail
-	{
-		int e = errno;
-		Log(0, "*** %s: ERROR: Could not fstat() configuration file '%s': %s!",
-			cg->ME, cg->configFile, strerror(e));
-		return false;
-	}
-	// + 1 for trailing NULL
-	if ((buf = (char *) realloc(buf, statbuf.st_size + 1)) == NULL)
-	{
-		int e = errno;
-		Log(0, "*** %s: ERROR: Could not malloc() configuration file '%s': %s!",
-			cg->ME, cg->configFile, strerror(e));
-		return false;
-	}
-	if (read(fd, buf, statbuf.st_size) != statbuf.st_size)
-	{
-		int e = errno;
-		Log(0, "*** %s: ERROR: Could not read() configuration file '%s': %s!",
-			cg->ME, cg->configFile, strerror(e));
-		return false;
-	}
-	buf[statbuf.st_size] = '\0';
-	(void) close(fd);
+	// Read the whole configuration file into memory so we can create argv with pointers.
+	static char *buf = readFileIntoBuffer(cg, cg->configFile);
+	if (buf == NULL)
+		return(false);
 
 	int const numSettings = 500 * 2;	// some settings take an argument
 	char *argv[numSettings];
@@ -1468,6 +1484,7 @@ static bool getConfigFileArguments(config *cg)
 
 	argv[argc++] = (char *) "getConfigFileArguments()";
 	char *line;
+	(void) getLine(NULL);		// resets the buffer pointer
 	while ((line = getLine(buf)) != NULL)
 	{
 		lineNum++;
@@ -1490,7 +1507,6 @@ static bool getConfigFileArguments(config *cg)
 			equal++;
 		}
 		// "equal" is pointing at equal sign or end of argumment
-// TODO: if line doesn't start with "-", add it
 		argv[argc++] = line;
 		if (*equal == '=')
 		{
@@ -1507,14 +1523,14 @@ static bool getConfigFileArguments(config *cg)
 
 	// Let's hope the config file doesn't call itself!
 	called_from_getConfigFileArguments = true;
-	bool ret = getCommandLineArguments(cg, argc, argv);
+	bool ret = getCommandLineArguments(cg, argc, argv, false);
 	called_from_getConfigFileArguments = false;
 	return(ret);
 }
 
 
 // Get arguments from the command line.
-bool getCommandLineArguments(config *cg, int argc, char *argv[])
+bool getCommandLineArguments(config *cg, int argc, char *argv[], bool readConfigFile)
 {
 	const char *b;
 	if (called_from_getConfigFileArguments)
@@ -1539,7 +1555,9 @@ bool getCommandLineArguments(config *cg, int argc, char *argv[])
 			// any command-line arguments after it will overwrite the config file.
 			// A file name of "[none]" means to ignore the option.
 			cg->configFile = argv[++i];
-			if (strcmp(cg->configFile, "[none]") != 0 && ! getConfigFileArguments(cg))
+			if (readConfigFile &&
+				strcmp(cg->configFile, "[none]") != 0 &&
+				! getConfigFileArguments(cg))
 			{
 				return(false);
 			}
@@ -1979,7 +1997,8 @@ bool getCommandLineArguments(config *cg, int argc, char *argv[])
 	// producing Camera Capabilities info, in which case we need cg->CC_saveFile set so
 	// we know where to put the info.
 	// If we are in "help" mode then we won't take picture AND won't produce CC info.
-	if (cg->saveDir == NULL && cg->CC_saveFile == NULL && ! cg->help) {
+	if (cg->saveDir == NULL && cg->CC_saveFile == NULL &&
+			! cg->help && called_from_getConfigFileArguments) {
 		cg->saveDir = cg->allskyHome;
 		Log(-1, "*** %s: WARNING: No directory to save images was specified. Using: [%s]\n",
 			cg->ME, cg->saveDir);

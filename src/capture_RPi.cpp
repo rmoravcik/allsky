@@ -83,12 +83,14 @@ int RPicapture(config cg, cv::Mat *image)
 	stringstream ss, ss2;
 
 	ss << cg.fullFilename;
-	command += " --output '" + ss.str() + "'";
+	command += " --thumb none --output '" + ss.str() + "'";		// don't include a thumbnail in the file
 
 	if (cg.isLibcamera)
 	{
+		command += " --no-raw 1";
+
 		// libcamera tuning file
-		if (cg.currentTuningFile != NULL && strcmp(cg.currentTuningFile, "") != 0) {
+		if (cg.currentTuningFile != NULL && *cg.currentTuningFile != '\0') {
 			ss.str("");
 			ss << cg.currentTuningFile;
 			command += " --tuning-file '" + ss.str() + "'";
@@ -99,10 +101,11 @@ int RPicapture(config cg, cv::Mat *image)
 	}
 	else
 	{
-		command += " --thumb none --burst -st";
+		command += " --burst -st";
 	}
 
 	// --timeout (in MS) determines how long the video will run before it takes a picture.
+	// Value of 0 runs forever.
 	if (cg.preview)
 	{
 		stringstream wh;
@@ -120,6 +123,8 @@ int RPicapture(config cg, cv::Mat *image)
 			if (myModeMeanSetting.meanAuto != MEAN_AUTO_OFF)
 			{
 				// We do our own auto-exposure so no need to wait at all.
+// TODO: --immediate 0   works fine on Bookworm.
+// If it also works on Bullseye then use it when we no longer support Buster.
 				// Tried --immediate, but on Buster (don't know about Bullseye), it hung exposures.
 				ss << 1;
 			}
@@ -157,16 +162,11 @@ int RPicapture(config cg, cv::Mat *image)
 		//	'SRGGB10_CSI2P' : 1332x990 
 		//	'SRGGB12_CSI2P' : 2028x1080 2028x1520 4056x3040 
 		//								bin 2x2   bin 1x1
-		if (cg.currentBin == 1)
+		// cg.width and cg.height are already reduced for binning as needed.
+		if (cg.currentBin == 1 || cg.currentBin == 2)
 		{
 			ss << cg.width;
 			ss2 << cg.height;
-			command += " --width " + ss.str() + " --height " + ss2.str();
-		}
-		else if (cg.currentBin == 2)
-		{
-			ss << cg.width / 2;
-			ss2 << cg.height / 2;
 			command += " --width " + ss.str() + " --height " + ss2.str();
 		}
 	}
@@ -176,9 +176,10 @@ int RPicapture(config cg, cv::Mat *image)
 			command += " --mode 3";
 		else if (cg.currentBin == 2)
 		{
-			ss << cg.width / 2;
-			ss2 << cg.height / 2;
-			command += " --mode 2 --width " + ss.str() + " --height " + ss2.str();
+			command += " --mode 2";
+//x			ss << cg.width / 2;
+//x			ss2 << cg.height / 2;
+//x			command += " --mode 2 --width " + ss.str() + " --height " + ss2.str();
 		}
 	}
 
@@ -366,10 +367,6 @@ int main(int argc, char *argv[])
 {
 	CG.ME = basename(argv[0]);
 
-	/* getenv() is used for variables that need to be known very early,
-	 * usually before reading the command-line arguments.
-	*/
-
 	CG.allskyHome = getenv("ALLSKY_HOME");
 	if (CG.allskyHome == NULL)
 	{
@@ -377,37 +374,11 @@ int main(int argc, char *argv[])
 		exit(EXIT_ERROR_STOP);
 	}
 
-	char *x = getenv("ALLSKY_DEBUG_LEVEL");
-	if (x != NULL) { CG.debugLevel = atoi(x); }
-
-	CG.connectedCamerasFile = getenv("CONNECTED_CAMERAS_INFO");
-	if (CG.connectedCamerasFile == NULL)
+	if (! getCommandLineArguments(&CG, argc, argv, false))
 	{
-		Log(0, "*** %s: ERROR: CONNECTED_CAMERAS_INFO not set!\n", CG.ME);
+		// getCommandLineArguments outputs an error message.
 		exit(EXIT_ERROR_STOP);
 	}
-	CG.RPI_cameraInfoFile = getenv("RPi_SUPPORTED_CAMERAS");
-	if (CG.RPI_cameraInfoFile == NULL)
-	{
-		Log(0, "*** %s: ERROR: RPi_SUPPORTED_CAMERAS not set!\n", CG.ME);
-		exit(EXIT_ERROR_STOP);
-	}
-
-	CG.cmdToUse = getenv("RPi_COMMAND_TO_USE");
-	if (CG.cmdToUse != NULL)
-	{
-		if (strcmp(CG.cmdToUse, "rpicam-still") == 0 ||
-		    strcmp(CG.cmdToUse, "libcamera-still") == 0)
-		{
-			CG.isLibcamera = true;
-		}
-		else
-		{
-			CG.isLibcamera = false;
-		}
-	}
-	Log(4, "CONNECTED_CAMERAS_INFO=[%s], RPi_SUPPORTED_CAMERAS=[%s], RPi_COMMAND_TO_USE=[%s]\n",
-		CG.connectedCamerasFile, CG.RPI_cameraInfoFile, CG.cmdToUse);
 
 	char bufTime[128]			= { 0 };
 	char bufTemp[1024]			= { 0 };
@@ -444,9 +415,9 @@ int main(int argc, char *argv[])
 	if (! setDefaults(&CG, ASICameraInfo))
 		closeUp(EXIT_ERROR_STOP);
 
-	if (! getCommandLineArguments(&CG, argc, argv))
+	if (CG.configFile[0] != '\0' && ! getConfigFileArguments(&CG))
 	{
-		// getCommandLineArguents outputs an error message.
+		// getConfigFileArguments() outputs error messages
 		exit(EXIT_ERROR_STOP);
 	}
 

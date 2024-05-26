@@ -22,8 +22,8 @@ if [[ -z "${ALLSKY_VARIABLE_SET}" ]]; then
 		RED="\033[0;31m";		wERROR="${RED}"
 		# Can't use DEBUG since lots of scripts use that to enable debugging
 		cDEBUG="${YELLOW}";		wDEBUG="${YELLOW}"
+		BOLD="\033[1m";			wBOLD="["; wNBOLD="]"
 		NC="\033[0m";			wNC="${NC}"
-								wBOLD="["; wNBOLD="]"
 								wBR="\n"
 	else
 		ON_TTY="false"
@@ -31,8 +31,8 @@ if [[ -z "${ALLSKY_VARIABLE_SET}" ]]; then
 		YELLOW="";				wWARNING="<span style='color: #FF9800'>"
 		RED="";					wERROR="<span style='color: red'>"
 		cDEBUG="";				wDEBUG="${wWARNING}"
+		BOLD="";				wBOLD="<b>"; wNBOLD="</b>"
 		NC="";					wNC="</span>"
-								wBOLD="<b>"; wNBOLD="</b>"
 								wBR="<br>"
 	fi
 
@@ -54,6 +54,7 @@ if [[ -z "${ALLSKY_VARIABLE_SET}" ]]; then
 
 	# Holds all the scripts.
 	ALLSKY_SCRIPTS="${ALLSKY_HOME}/scripts"
+	ALLSKY_UTILITIES="${ALLSKY_SCRIPTS}/utilities"
 
 	# Holds all the binaries.
 	ALLSKY_BIN="${ALLSKY_HOME}/bin"
@@ -71,6 +72,9 @@ if [[ -z "${ALLSKY_VARIABLE_SET}" ]]; then
 
 	# Holds a count of continuous "bad" images
 	ALLSKY_BAD_IMAGE_COUNT="${ALLSKY_TMP}/bad_image_count.txt"
+
+	# Holds the number of images left until uploading.
+	FREQUENCY_FILE="${ALLSKY_TMP}/IMG_UPLOAD_FREQUENCY.txt"
 
 	# Holds the PID of the process that called timelapse.sh.
 	ALLSKY_TIMELAPSE_PID_FILE="${ALLSKY_TMP}/timelapse-pid.txt"
@@ -167,6 +171,8 @@ if [[ -z "${ALLSKY_VARIABLE_SET}" ]]; then
 
 		CAMERA_TYPE="$( jq -r '.cameratype' "${SETTINGS_FILE}" )"
 		CAMERA_MODEL="$( jq -r '.cameramodel' "${SETTINGS_FILE}" )"
+		CAMERA_NUMBER="$( jq -r '.cameranumber' "${SETTINGS_FILE}" )"
+		CAMERA_NUMBER="${CAMERA_NUMBER:-0}"
 
 		# So scripts can conditionally output messages.
 		ALLSKY_DEBUG_LEVEL="$( jq -r '.debuglevel' "${SETTINGS_FILE}" )"

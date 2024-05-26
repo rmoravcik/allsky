@@ -70,6 +70,7 @@ PRIOR_ALLSKY_VERSION=""			# The version number of the prior version, if known
 PRIOR_ALLSKY_BASE_VERSION=""	# The base version number of the prior version, if known
 PRIOR_CAMERA_TYPE=""
 PRIOR_CAMERA_MODEL=""
+PRIOR_CAMERA_NUMBER=""
 
 # Holds status of installation if we need to exit and get back in.
 STATUS_FILE="${ALLSKY_LOGS}/install_status.txt"
@@ -80,6 +81,7 @@ STATUS_NO_FINISH_REBOOT="Did not reboot to finish installation"
 STATUS_NO_REBOOT="User elected not to reboot"
 STATUS_NO_LOCALE="Desired locale not found"			# exiting due to desired locale not installed
 STATUS_NO_CAMERA="No camera found"					# status of exiting due to no camera found
+STATUS_NO_LAT_LONG="Latitude and/or Longitude not entered"
 STATUS_OK="OK"										# Installation was completed.
 STATUS_NOT_CONTINUE="User elected not to continue"	# Exiting, but not an error
 STATUS_CLEAR="Clear"								# Clear the file
@@ -270,83 +272,113 @@ CAMERA_to_CAMERA_TYPE()
 # Have separate function so it can be called from "--function".
 setup_rpi_supported_cameras()
 {
+	local CMD="${1}"
+
 	if [[ ! -f ${RPi_SUPPORTED_CAMERAS} ]]; then
 		local B="$( basename "${RPi_SUPPORTED_CAMERAS}" )"
-		# Remove comment and blank lines.
-		grep -v -E '^$|^#' "${ALLSKY_REPO}/${B}.repo" > "${RPi_SUPPORTED_CAMERAS}"
+		if [[ -z ${CMD} ]]; then
+			CMD="xxxxx"		# won't match anything
+		elif [[ ${CMD} == "raspistill" ]]; then
+			CMD="libcamera"
+		else
+			CMD="raspistill"
+		fi
+
+		local MSG="Creating ${RPi_SUPPORTED_CAMERAS} with '${CMD}' entries."
+		display_msg --log progress "${MSG}"
+
+		# Remove comment and blank lines and lines for the command we are NOT using.
+		grep -v -E "^\$|^#|^${CMD}" "${ALLSKY_REPO}/${B}.repo" > "${RPi_SUPPORTED_CAMERAS}"
 	fi
 }
 
 #######
-CONNECTED_CAMERAS=""
-# TODO: Make arrays and allow multiple cameras of each camera type
-RPI_MODEL="HQ, Module 3, and compatibles"
-ZWO_MODEL="ASI"
+CONNECTED_CAMERA_MODELS=""
+NUM_CONNECTED_CAMERAS=0
+CT=()			# Camera Type array - what to display in whiptail
 
 get_connected_cameras()
 {
-	local C  CC=""  MSG
-	# RPI_MODEL, ZWO_MODEL, and CONNECTED_CAMERAS are global
-
-	setup_rpi_supported_cameras
+	local C  CC=""  MSG   NUM_RPI=0   NUM_ZWO=0
 
 	# true == ignore errors.  ${C} will be "" if no command found.
 	C="$( determineCommandToUse "false" "" "true" 2> /dev/null )"
 
-	# RPi format:	RPi \t camera_number : camera_model [4056x3050]
-	# ZWO format:	ZWO \t camera_number : camera_model ZWO_camera_ID
+	setup_rpi_supported_cameras "${C}"
+
+	# RPi format:	RPi \t camera_number : camera_sensor	_other_stuff_
+	# ZWO format:	ZWO \t camera_number : camera_model		ZWO_camera_ID
 	# "true" == ignore errors
 	get_connected_cameras_info "true" > "${CONNECTED_CAMERAS_INFO}" 2>/dev/null
 
-	# Check if there is an RPi camera connected, and if so,
-	# determine what command to use to control it.
+	# Get the RPi connected cameras, if any.
+	# It's SENSOR is listed and we need to convert it to the MODEL that's
+	# in ${RPi_SUPPORTED_CAMERAS}.
 	if [[ -n ${C} ]]; then
-		# Only get the first camera.
-		RPI_MODEL="$( gawk '{if ($1 == "RPi") { print $4; exit 0; }}' "${CONNECTED_CAMERAS_INFO}" )"
-		if [[ -n ${RPI_MODEL} ]]; then
-			[[ -z ${FUNCTION} ]] && display_msg --log progress "RPi ${RPI_MODEL} camera found."
+		local RPI_SENSORS="$( gawk '{if ($1 == "RPi") { print $4; }}' "${CONNECTED_CAMERAS_INFO}" )"
+		if [[ -n ${RPI_SENSORS} ]]; then
 			CC="RPi"
+			if [[ -z ${FUNCTION} ]]; then
+				for SENSOR in ${RPI_SENSORS}
+				do
+					MODEL="$( get_model_from_sensor "${SENSOR}" )"
+# TODO: check for $? -ne 0
+					local FULL_NAME="${MODEL} (${SENSOR})"
+					display_msg --log progress "RPi ${FULL_NAME} camera found."
+					# The camera model may have "_" in it,
+					# so separate fields with a different character.
+					CT+=("${NUM_RPI};RPi;${MODEL}" "RPi     ${FULL_NAME}")
+					((NUM_RPI++))
+				done
+			fi
 		fi
 	fi
 
-	# Check if there is a ZWO USB-based camera.
-	# Only get the first camera.
-# TODO: support multiple RPi and ZWO cameras
-	ZWO_MODEL="$( gawk '{if ($1 == "ZWO") { print $4; exit 0; }}' "${CONNECTED_CAMERAS_INFO}" )"
-	if [[ -n ${ZWO_MODEL} ]]; then
-		[[ -z ${FUNCTION} ]] && display_msg --log progress "ZWO ${ZWO_MODEL} camera found."
+	# Get the ZWO connected cameras, if any.
+	local ZWO_MODELS="$( gawk '{if ($1 == "ZWO") { print $4; }}' "${CONNECTED_CAMERAS_INFO}" )"
+	if [[ -n ${ZWO_MODELS} ]]; then
 		[[ -n ${CC} ]] && CC+=" "
 		CC+="ZWO"
+		if [[ -z ${FUNCTION} ]]; then
+			for MODEL in ${ZWO_MODELS}
+			do
+				display_msg --log progress "ZWO ${MODEL} camera found."
+				CT+=( "${NUM_ZWO};ZWO;${MODEL}" "ZWO     ${MODEL}" )
+				((NUM_ZWO++))
+			done
+		fi
 	fi
 
-	if [[ -z ${CC} ]]; then
+	NUM_CONNECTED_CAMERAS=$(( NUM_RPI + NUM_ZWO ))
+	if [[ ${NUM_CONNECTED_CAMERAS} -eq 0 ]]; then
 		MSG="No connected cameras were detected.  The installation will exit."
+		MSG+="\nMake sure a camera is plugged in and working prior to restarting"
+		MSG+=" the installation."
 		whiptail --title "${TITLE}" --msgbox "${MSG}" 12 "${WT_WIDTH}" 3>&1 1>&2 2>&3
 
 		MSG="No connected cameras were detected."
-		MSG+="\nMake sure a camera is plugged in and working prior to restarting"
-		MSG+=" the installation."
 		display_msg --log error "${MSG}"
 		exit_installation 1 "${STATUS_NO_CAMERA}" ""
 	fi
 
-	if [[ -n ${CONNECTED_CAMERAS} ]]; then
-		# Set from a prior installation.
-		if [[ ${CONNECTED_CAMERAS} != "${CC}" ]]; then
-			MSG="Connected cameras were '${CONNECTED_CAMERAS}' during last installation"
+	declare -n v="${FUNCNAME[0]}";
+	[[ ${v} != "true" ]] && STATUS_VARIABLES+=("${FUNCNAME[0]}='true'\n")
+
+	# CONNECTED_CAMERAS_MODELS was set from a prior installation, if any.
+	# If it was set, warn the user if the prior models is different than
+	# the current ones, but it's not an error.
+	if [[ -n ${CONNECTED_CAMERA_MODELS} ]]; then
+		if [[ ${CONNECTED_CAMERA_MODELS} != "${CC}" ]]; then
+			MSG="Connected cameras were '${CONNECTED_CAMERA_MODELS}' during last installation"
 			MSG+=" but are '${CC}' now."
 			display_msg --log info "${MSG}"
-			STATUS_VARIABLES+=("CONNECTED_CAMERAS='${CC}'\n")
+			STATUS_VARIABLES+=("CONNECTED_CAMERA_MODELS='${CC}'\n")
+			CONNECTED_CAMERA_MODELS="${CC}"
 		fi
-		# Else the last one and this one are the same so don't save.
-		CONNECTED_CAMERAS="${CC}"
 		return
 	fi
 
-	CONNECTED_CAMERAS="${CC}"	# Either not set before or is different this time
-
-	declare -n v="${FUNCNAME[0]}";
-	[[ ${v} != "true" ]] && STATUS_VARIABLES+=("${FUNCNAME[0]}='true'\n")
+	CONNECTED_CAMERA_MODELS="${CC}"	# Either not set before or is different this time
 }
 
 #
@@ -356,8 +388,9 @@ get_connected_cameras()
 CAMERA_TYPE=""
 select_camera_type()
 {
-	local MSG  CAMERA  NEW  CT  NUM_RPI=0  NUM_ZWO=0  S  CAMERA_INFO  NUM
-	# CAMERA_TYPE is global
+	local MSG  CAMERA  NEW  S  CAMERA_INFO
+	# CAMERA_TYPE and NUM_CONNECTED_CAMERAS are global
+
 	if [[ -n ${PRIOR_ALLSKY_DIR} ]]; then
 		# bash doesn't have ">=" so we have to use "! ... < "
 		if [[ ! ${PRIOR_ALLSKY_VERSION} < "${FIRST_CAMERA_TYPE_BASE_VERSION}" ]]; then
@@ -368,6 +401,12 @@ select_camera_type()
 				MSG="Using Camera Type '${CAMERA_TYPE}' from prior Allsky; not prompting user."
 				display_msg --logonly info "${MSG}"
 				STATUS_VARIABLES+=("CAMERA_TYPE='${CAMERA_TYPE}'\n")
+				if [[ -n ${CAMERA_MODEL} ]]; then
+					STATUS_VARIABLES+=("CAMERA_MODEL='${CAMERA_MODEL}'\n")
+				fi
+				if [[ -n ${CAMERA_NUMBER} ]]; then
+					STATUS_VARIABLES+=("CAMERA_NUMBER='${CAMERA_NUMBER}'\n")
+				fi
 				STATUS_VARIABLES+=("${FUNCNAME[0]}='true'\n")
 				return
 			else
@@ -387,6 +426,7 @@ select_camera_type()
 				fi
 				display_msg --log progress "Using prior ${CAMERA} camera${NEW}."
 				STATUS_VARIABLES+=("CAMERA_TYPE='${CAMERA_TYPE}'\n")
+				# Old style doesn't have CAMERA_MODEL or CAMERA_NUMBER.
 				STATUS_VARIABLES+=("${FUNCNAME[0]}='true'\n")
 				return
 			else
@@ -396,49 +436,29 @@ select_camera_type()
 		fi
 	fi
 
-	CT=()			# Camera Type array - what to display in whiptail
-	if [[ ${CONNECTED_CAMERAS} =~ "RPi" ]]; then
-		CT+=("${NUM_RPI}_RPi_${RPI_MODEL}" "RPi     ${RPI_MODEL}")
-		((NUM_RPI++))
-	fi
-	if [[ ${CONNECTED_CAMERAS} =~ "ZWO" ]]; then
-		CT+=("${NUM_ZWO}_ZWO_${ZWO_MODEL}" "ZWO     ${ZWO_MODEL}")
-		((NUM_ZWO++))
-	fi
-	NUM=$(( NUM_RPI + NUM_ZWO ))
-	if [[ ${NUM} -eq 0 ]]; then		# shouldn't happen since we already checked
-		MSG="INTERNAL ERROR:"
-		if [[ -z ${CONNECTED_CAMERAS} ]]; then
-			MSG+=" CONNECTED_CAMERAS is empty."
-		else
-			MSG+=" CONNECTED_CAMERAS (${CONNECTED_CAMERAS}) is invalid."
-		fi
-		display_msg --log error "${MSG}"
-		exit_installation 2 "${STATUS_NO_CAMERA}" "${MSG}"
-	fi
-
 	S=" is"
-	[[ ${NUM} -gt 1 ]] && S="s are"
+	[[ ${NUM_CONNECTED_CAMERAS} -gt 1 ]] && S="s are"
 	MSG="\nThe following camera${S} connected to the Pi.\n"
-	[[ ${NUM} -gt 1 ]] && MSG+="Pick the one you want."
+	[[ ${NUM_CONNECTED_CAMERAS} -gt 1 ]] && MSG+="Pick the one you want."
 	MSG+="\nIf it's not in the list, select <Cancel> and determine why."
-	CAMERA_INFO=$( whiptail --title "${TITLE}" --notags --menu "${MSG}" 15 "${WT_WIDTH}" "${NUM}" \
-		"${CT[@]}" 3>&1 1>&2 2>&3 )
-	if [[ $? -ne 0 ]]; then
+	if ! CAMERA_INFO=$( whiptail --title "${TITLE}" --notags --menu "${MSG}" 15 "${WT_WIDTH}" \
+			"${NUM_CONNECTED_CAMERAS}" "${CT[@]}" 3>&1 1>&2 2>&3 ) ; then
 		MSG="Camera selection required."
 		MSG+=" Please re-run the installation and select a camera to continue."
 		display_msg --log warning "${MSG}"
 		exit_installation 2 "${STATUS_NO_CAMERA}" "User did not select a camera."
 	fi
-	# CAMERA_INFO is:    number_type_model
-# TODO: CAMERA_NUMBER not used yet
-	CAMERA_NUMBER="${CAMERA_INFO%%_*}"				# before first "_"
-	CAMERA_MODEL="${CAMERA_INFO##*_}"				# after last "_"
-	CAMERA_INFO="${CAMERA_INFO/${CAMERA_NUMBER}_/}"	# Now:  type_model
-	CAMERA_TYPE="${CAMERA_INFO%_*}"					# before "_"
+	# CAMERA_INFO is:    number;type;model
+	CAMERA_NUMBER="${CAMERA_INFO%%;*}"				# before first ";"
+	CAMERA_MODEL="${CAMERA_INFO##*;}"				# after last ";"
+	CAMERA_INFO="${CAMERA_INFO/${CAMERA_NUMBER};/}"	# Now:  type;model
+	CAMERA_TYPE="${CAMERA_INFO%;*}"					# before ";"
 
 	display_msg --log progress "Using user-selected ${CAMERA_TYPE} ${CAMERA_MODEL} camera."
 	STATUS_VARIABLES+=("CAMERA_TYPE='${CAMERA_TYPE}'\n")
+	STATUS_VARIABLES+=("CAMERA_MODEL='${CAMERA_MODEL}'\n")
+	STATUS_VARIABLES+=("CAMERA_NUMBER='${CAMERA_NUMBER}'\n")
+
 	STATUS_VARIABLES+=("${FUNCNAME[0]}='true'\n")
 }
 
@@ -491,29 +511,28 @@ do_save_camera_capabilities()
 		display_msg --log progress "${MSG}"
 	fi
 
-	# Restore the prior settings file or camera-specific settings file(s) so
+	# Restore the prior settings file or camera-specific settings file(s) if present so
 	# the appropriate one can be used by makeChanges.sh.
-	[[ ${PRIOR_ALLSKY_DIR} != "" ]] && restore_prior_settings_file
+	[[ -n ${PRIOR_SETTINGS_FILE} ]] && restore_prior_settings_file
 
 	display_msg --log progress "Making new settings file '${SETTINGS_FILE}'."
 
-	### TODO: Eric no idea if this is right or not but it strips any suffix from the camera type
-	# shellcheck disable=SC2207
-    CAMERA_TYPE_PARTS=($(echo "$CAMERA_TYPE" | tr "_" "\n"))
-    if [[ ${#CAMERA_TYPE_PARTS[@]} = 2 ]]; then
-		CAMERA_TYPE=${CAMERA_TYPE_PARTS[0]}
-	fi
-
 	CMD="makeChanges.sh${FORCE}${OPTIONSONLY} --cameraTypeOnly --fromInstall ${DEBUG_ARG}"
 	#shellcheck disable=SC2089
+	CMD+=" cameranumber 'Camera Number' '${PRIOR_CAMERA_NUMBER}' '${CAMERA_NUMBER}'"
+	#shellcheck disable=SC2089
+	CMD+=" cameramodel 'Camera Model' '${PRIOR_CAMERA_MODEL}' '${CAMERA_MODEL}'"
+
+	# cameratype needs to come last.
+	#shellcheck disable=SC2089
 	CMD+=" cameratype 'Camera Type' '${PRIOR_CAMERA_TYPE}' '${CAMERA_TYPE}'"
+
 	MSG="Executing ${CMD}"
 	display_msg "${LOG_TYPE}" info "${MSG}"
 
-	ERR="/tmp/makeChanges.errors.txt"
-
+	local TMP="${ALLSKY_LOGS}/makeChanges.log"
 	#shellcheck disable=SC2086,SC2090
-	M="$( eval "${ALLSKY_SCRIPTS}/"${CMD} 2> "${ERR}" )"
+	M="$( eval "${ALLSKY_SCRIPTS}/"${CMD} 2> "${TMP}" )"
 	RET=$?
 	if [[ ${RET} -ne 0 ]]; then
 		if [[ ${RET} -eq ${EXIT_NO_CAMERA} ]]; then
@@ -521,11 +540,12 @@ do_save_camera_capabilities()
 			MSG+="After connecting your camera, re-run the installation."
 			whiptail --title "${TITLE}" --msgbox "${MSG}" 12 "${WT_WIDTH}" 3>&1 1>&2 2>&3
 			display_msg --log error "No camera detected - installation aborted."
-			[[ -s ${ERR} ]] && display_msg --log error "$( < "${ERR}" )"
+			[[ -s ${TMP} ]] && display_msg --log error "$( < "${TMP}" )"
 			exit_with_image 1 "${STATUS_ERROR}" "No camera detected"
 		elif [[ ${OPTIONSFILEONLY} == "false" ]]; then
-			[[ -s ${ERR} ]] && display_msg --log error "$( < "${ERR}" )"
 			display_msg --log error "Unable to save camera capabilities."
+			[[ -s ${TMP} ]] && display_msg --log error "$( < "${TMP}" )"
+			[[ -n ${M} ]] && display_msg --log error "${M}"
 		fi
 		return 1
 	else
@@ -721,14 +741,14 @@ check_and_mount_tmp()
 	if [[ -d "${ALLSKY_TMP}" ]]; then
 		mkdir -p "${TMP_DIR}"
 		find "${ALLSKY_TMP}" \( -name '*.jpg' -o -name '*.png' \) -exec mv '{}' "${TMP_DIR}" \;
-		rm -f "${ALLSKY_TMP}"/*
+		rm -fr "${ALLSKY_TMP:?}"/*
 	else
 		mkdir "${ALLSKY_TMP}"
 	fi
 
 	# Now mount and restore any images that were there before
 	sudo systemctl daemon-reload 2> /dev/null
-	sudo mount -a
+	sudo mount -a || display_msg --log warning "Unable to mount '${ALLSKY_TMP}'."
 
 	if [[ -d ${TMP_DIR} ]]; then
 		mv "${TMP_DIR}"/* "${ALLSKY_TMP}" 2>/dev/null
@@ -765,7 +785,7 @@ check_success()
 # Install the web server.
 install_webserver_et_al()
 {
-	declare -n v="${FUNCNAME[0]}"; [[ ${v} == "true" ]] && return
+	declare -n v="${FUNCNAME[0]}"
 
 	sudo systemctl stop hostapd 2>/dev/null
 	sudo systemctl stop lighttpd 2>/dev/null
@@ -778,7 +798,8 @@ install_webserver_et_al()
 		TMP="${ALLSKY_LOGS}/lighttpd.install.log"
 		{
 			sudo apt-get update && \
-				sudo apt-get --assume-yes install lighttpd php-cgi php-gd hostapd dnsmasq avahi-daemon
+				sudo apt-get --assume-yes install lighttpd php-cgi \
+					php-gd hostapd dnsmasq avahi-daemon hwinfo
 		} > "${TMP}" 2>&1
 		check_success $? "lighttpd installation failed" "${TMP}" "${DEBUG}" ||
 			exit_with_image 1 "${STATUS_ERROR}" "lighttpd installation failed"
@@ -866,28 +887,19 @@ set_permissions()
 {
 	display_msg --log progress "Setting permissions on web-related files."
 
-	# Make sure the currently running user can run sudo on anything and
-	# can write to the webserver root (is in the webserver group).
+	# Make sure the currently running user is in the right groups.
+	# "sudo" allows them to run sudo on anything.
+	# "${WEBSERVER_GROUP}" allows the web server to write files to Allsky directories.
+	# "video" allows the user to access video devices
 	local G="$( id "${ALLSKY_OWNER}" )"
-	#shellcheck disable=SC2076
-	if ! [[ ${G} =~ "(sudo)" ]]; then
-		display_msg --log progress "Adding ${ALLSKY_OWNER} to sudo group."
-
-		### TODO:  Hmmm.  We need to run "sudo" to add to the group,
-		### but we don't have "sudo" permissions yet... so this will likely fail:
-
-		sudo adduser --quiet "${ALLSKY_OWNER}" "sudo"
-	fi
-	#shellcheck disable=SC2076
-	if ! [[ ${G} =~ "(${WEBSERVER_GROUP})" ]]; then
-		display_msg --log progress "Adding ${ALLSKY_OWNER} to ${WEBSERVER_GROUP} group."
-		sudo adduser --quiet "${ALLSKY_OWNER}" "${WEBSERVER_GROUP}"
-
-		# TODO: We had a case where the login shell wasn't in the group after "adduser"
-		# until the user logged out and back in.
-		# And this was AFTER he ran install.sh and rebooted.
-		# Not sure what to do about that...
-	fi
+	for g in "sudo" "${WEBSERVER_GROUP}" "video"
+	do
+		#shellcheck disable=SC2076
+		if ! [[ ${G} =~ "(${g})" ]]; then
+			display_msg --log progress "Adding ${ALLSKY_OWNER} to ${g} group."
+			sudo adduser --quiet "${ALLSKY_OWNER}" "${g}"
+		fi
+	done
 
 	# The web server needs to be able to create and update many of the files in ${ALLSKY_CONFIG}.
 	# Not all, but go ahead and chgrp all of them so we don't miss any new ones.
@@ -895,9 +907,10 @@ set_permissions()
 	sudo find "${ALLSKY_CONFIG}/" -type d -exec chmod 775 '{}' \;
 	sudo chgrp -R "${WEBSERVER_GROUP}" "${ALLSKY_CONFIG}"
 
-	sudo mkdir -p "${ALLSKY_MODULE_LOCATION}/modules"
-	sudo chgrp -R "${WEBSERVER_GROUP}" "${ALLSKY_MODULE_LOCATION}"
-	sudo chmod -R 775 "${ALLSKY_MODULE_LOCATION}"
+	# Modules and overlays
+	sudo mkdir -p "${ALLSKY_MODULE_LOCATION}/modules" "${MY_OVERLAY_TEMPLATES}"
+	sudo chgrp -R "${WEBSERVER_GROUP}" "${ALLSKY_MODULE_LOCATION}" "${MY_OVERLAY_TEMPLATES}"
+	sudo chmod -R 775 "${ALLSKY_MODULE_LOCATION}" "${MY_OVERLAY_TEMPLATES}"
 
 	# The files should already be the correct permissions/owners, but just in case, set them.
 	# We don't know what permissions may have been on the old website, so use "sudo".
@@ -905,9 +918,6 @@ set_permissions()
 	sudo find "${ALLSKY_WEBUI}/" -type d -exec chmod 755 '{}' \;
 
 	# Exceptions to files at 644:
-	chmod 755	"${ALLSKY_WEBUI}/includes/createAllskyOptions.php" \
-				"${ALLSKY_WEBUI}/includes/convertJSON.php"
-
 	chmod 775 "${ALLSKY_TMP}"
 	sudo chgrp "${WEBSERVER_GROUP}" "${ALLSKY_TMP}"
 
@@ -1038,7 +1048,7 @@ get_desired_locale()
 	local MSG2=""
 	if [[ -z ${DESIRED_LOCALE} && -n ${PRIOR_ALLSKY_DIR} && -n ${PRIOR_SETTINGS_FILE} ]]; then
 		# People rarely change locale once set, so assume they still want the prior one.
-		DESIRED_LOCALE="$( settings .locale "${PRIOR_SETTINGS_FILE}" )"
+		DESIRED_LOCALE="$( settings ".locale" "${PRIOR_SETTINGS_FILE}" )"
 		if [[ -n ${DESIRED_LOCALE} ]]; then
 			local X="$( echo "${INSTALLED_LOCALES}" | grep "${DESIRED_LOCALE}" )"
 			if [[ -z ${X} ]]; then
@@ -1097,7 +1107,7 @@ get_desired_locale()
 	if [[ -z ${DESIRED_LOCALE} ]]; then
 		MSG="You need to set the locale before the installation can run."
 		MSG+="\n  If your desired locale was not in the list,"
-		MSG+="\n   run 'raspi-config' to update the list, then rerun the installation."
+		MSG+="\n   run 'sudo raspi-config' to update the list, then rerun the installation."
 		display_msg info "${MSG}"
 		display_msg --logonly info "No locale selected; exiting."
 
@@ -1167,7 +1177,7 @@ display_msg --logonly info "Settings files now:\n${MSG}"
 		do_reboot "${STATUS_LOCALE_REBOOT}" ""		# does not return
 	fi
 
-	display_msg warning "You must reboot before continuing with the installation."
+	display_msg warning "You must reboot to set the locale before continuing with the installation."
 	display_msg --logonly info "User elected not to reboot to update locale."
 
 	exit_installation 0 "${STATUS_NO_REBOOT}" "to update locale."
@@ -1294,7 +1304,6 @@ does_prior_Allsky_exist()
 	# If a prior config directory doesn't exist then there's no prior Allsky.
 	if [[ ! -d ${PRIOR_CONFIG_DIR} ]]; then
 		if [[ -d ${PRIOR_ALLSKY_DIR} ]]; then
-			MSG="Prior Allsky directory found at '${PRIOR_ALLSKY_DIR}'"
 			MSG+=" but it doesn't appear to have been installed; ignoring it."
 			display_msg --log warning "${MSG}"
 		else
@@ -1305,17 +1314,16 @@ does_prior_Allsky_exist()
 		return 1
 	fi
 
-	display_msg --logonly info "Prior Allsky found in ${PRIOR_ALLSKY_DIR}."
-
 	# All versions back to v0.6 (never checked prior ones) have a "scripts" directory.
 	if [[ ! -d "${PRIOR_ALLSKY_DIR}/scripts" ]]; then
-		MSG="Prior Allsky directory found at '${PRIOR_ALLSKY_DIR}'"
 		MSG+=" but it doesn't appear to be valid; ignoring it."
 		display_msg --log warning "${MSG}"
 		does_prior_Allsky_Website_exist ""
 		PRIOR_ALLSKY_DIR=""
 		return 1
 	fi
+
+	display_msg --logonly info "Prior Allsky found in ${PRIOR_ALLSKY_DIR}."
 
 	# Determine the prior Allsky version and set some PRIOR_* locations.
 	PRIOR_ALLSKY_VERSION="$( get_version "${PRIOR_ALLSKY_DIR}/" )"	# Returns "" if no version file.
@@ -1334,9 +1342,11 @@ does_prior_Allsky_exist()
 			PRIOR_CAMERA_TYPE="$( settings ".cameratype" "${PRIOR_SETTINGS_FILE}" )"
 			if [[ -n ${PRIOR_CAMERA_TYPE} ]]; then
 				PRIOR_CAMERA_MODEL="$( settings ".cameramodel" "${PRIOR_SETTINGS_FILE}" )"
+				PRIOR_CAMERA_NUMBER="$( settings ".cameranumber" "${PRIOR_SETTINGS_FILE}" )"
 			else
 				PRIOR_CAMERA_TYPE="$( settings ".cameraType" "${PRIOR_SETTINGS_FILE}" )"
 				PRIOR_CAMERA_MODEL="$( settings ".cameraModel" "${PRIOR_SETTINGS_FILE}" )"
+				PRIOR_CAMERA_NUMBER="$( settings ".cameraNumber" "${PRIOR_SETTINGS_FILE}" )"
 			fi
 		else
 			# This shouldn't happen...
@@ -1444,7 +1454,11 @@ prompt_for_prior_Allsky()
 		if whiptail --title "${TITLE}" --yesno "${MSG}" 20 "${WT_WIDTH}"  3>&1 1>&2 2>&3; then
 			# Set the prior camera type to the new, default camera type.
 			CAMERA_TYPE="${PRIOR_CAMERA_TYPE}"
+			CAMERA_MODEL="${PRIOR_CAMERA_MODEL}"
+			CAMERA_NUMBER="${PRIOR_CAMERA_NUMBER}"
 			STATUS_VARIABLES+=("CAMERA_TYPE='${CAMERA_TYPE}'\n")
+			STATUS_VARIABLES+=("CAMERA_MODEL='${CAMERA_MODEL}'\n")
+			STATUS_VARIABLES+=("CAMERA_NUMBER='${CAMERA_NUMBER}'\n")
 			display_msg --logonly info "Will restore from prior version of Allsky."
 			WILL_USE_PRIOR="true"
 		else
@@ -1452,9 +1466,10 @@ prompt_for_prior_Allsky()
 			PRIOR_SETTINGS_FILE=""
 			CAMERA_TYPE=""
 			PRIOR_CAMERA_TYPE=""
+			PRIOR_CAMERA_MODEL=""
+			PRIOR_CAMERA_NUMBER=""
 			MSG="If you want your old images, darks, settings, etc. from the prior version"
 			MSG+=" of Allsky, you'll need to manually move them to the new version."
-			MSG+="\nThis can take quite a while."
 			whiptail --title "${TITLE}" --msgbox "${MSG}" 12 "${WT_WIDTH}" 3>&1 1>&2 2>&3
 			display_msg --logonly info "Will NOT restore from prior version of Allsky."
 		fi
@@ -1494,11 +1509,35 @@ install_dependencies_etc()
 	# They also take a little while, so hide the output and let the user know.
 
 	display_msg --log progress "Installing dependencies."
+
+	local T="${ALLSKY_SCRIPTS}/allsky-config"
+	if [[ ! -f "${T}" ]]; then
+		local F="${ALLSKY_UTILITIES}/allsky-config.sh"
+		display_msg --logonly info "Creating link to ${F}"
+		ln -s "${F}" "${T}"		|| echo "Unable to ln -s '${F}' '${T}'" >&2
+	fi
+
+	local T="${ALLSKY_SCRIPTS}/functions.php"
+	if [[ ! -f "${T}" ]]; then
+		local F="${ALLSKY_WEBUI}/includes/functions.php"
+		display_msg --logonly info "Creating link to ${F}"
+		ln -s "${F}" "${T}"		|| echo "Unable to ln -s '${F}' '${T}'" >&2
+	fi
+
 	TMP="${ALLSKY_LOGS}/make_deps.log"
 	#shellcheck disable=SC2024
 	sudo make deps > "${TMP}" 2>&1
 	check_success $? "Dependency installation failed" "${TMP}" "${DEBUG}" ||
 		exit_with_image 1 "${STATUS_ERROR}" "dependency installation failed"
+
+	# Set some default locations needed by the capture programs so we
+	# don't need to pass them in on the command line - if they are passed in,
+	# those values overwrite the defaults.
+	sed \
+		-e "s;XX_ALLSKY_HOME_XX;${ALLSKY_HOME};" \
+		-e "s;XX_CONNECTED_CAMERAS_FILE_XX;${CONNECTED_CAMERAS_INFO};" \
+		-e "s;XX_RPI_CAMERA_INFO_FILE_XX;${RPi_SUPPORTED_CAMERAS};" \
+		"${ALLSKY_HOME}/src/include/allsky_common.h.repo" > "${ALLSKY_HOME}/src/include/allsky_common.h"
 
 	display_msg --log progress "Preparing Allsky commands."
 	TMP="${ALLSKY_LOGS}/make_all.log"
@@ -1588,7 +1627,7 @@ convert_settings()			# prior_file, new_file
 	# Don't modify the prior file, so make the changes to a temporary file.
 	# --settings-only  says only output settings that are in the settings file.
 	# The OPTIONS_FILE doesn't exist yet so use REPO_OPTIONS_FILE>
-	"${ALLSKY_WEBUI}/includes/convertJSON.php" \
+	"${ALLSKY_SCRIPTS}/convertJSON.php" \
 		--convert \
 		--settings-only \
 		--settings-file "${PRIOR_FILE}" \
@@ -1606,7 +1645,7 @@ convert_settings()			# prior_file, new_file
 
 	# Output the field name and value as text separated by a tab.
 	# Field names are already lowercase from above.
-	"${ALLSKY_WEBUI}/includes/convertJSON.php" \
+	"${ALLSKY_SCRIPTS}/convertJSON.php" \
 			--delimiter "$( echo -e '\t' )" \
 			--options-file "${REPO_OPTIONS_FILE}" \
 			--include-not-in-options \
@@ -1714,7 +1753,7 @@ convert_settings()			# prior_file, new_file
 		fi
 	done
 
-	# shellcheck disable=SC2043
+	#shellcheck disable=SC2043
 	for s in zwoexposuretype
 	do
 		x="$( settings ".${s}" "${PRIOR_FILE}" )"
@@ -1724,25 +1763,27 @@ convert_settings()			# prior_file, new_file
 	done
 
 	# text fields
-	s="imagessortorder"
-	x="$( settings ".${s}" "${PRIOR_FILE}" )"
-	if [[ -z ${x} ]]; then
-		VALUE="ascending"; doV "NEW" "VALUE" "${s}" "text" "${NEW_FILE}"
-	fi
-
-	for s in daytimeoverlay nighttimeoverlay
+	for i in "imagessortorder:ascending" "daytimeoverlay:" "nighttimeoverlay:" "computer:"
 	do
+		#shellcheck disable=SC2207
+		ii=( $( tr ":" " " <<<"${i}" ) )
+		s="${ii[0]}"
+		v="${ii[1]}"
 		x="$( settings ".${s}" "${PRIOR_FILE}" )"
 		if [[ -z ${x} ]]; then
-			VALUE=""; doV "NEW" "VALUE" "${s}" "text" "${NEW_FILE}"
+			# Handle values that need to be calculated.
+			if [[ ${s} == "computer" ]]; then
+				v="$( get_computer )"
+			fi
+
+			VALUE="${v}"; doV "NEW" "VALUE" "${s}" "text" "${NEW_FILE}"
 		fi
 	done
-
 
 	# New fields were added to the bottom of the settings file but the below
 	# command will order them the same as in the options file, which we want.
 
-	"${ALLSKY_WEBUI}/includes/convertJSON.php" \
+	"${ALLSKY_SCRIPTS}/convertJSON.php" \
 		--convert \
 		--settings-only \
 		--settings-file "${NEW_FILE}" \
@@ -2120,7 +2161,7 @@ restore_prior_settings_file()
 		return
 	fi
 
-	local MSG NAME EXT FIRST_ONE CHECK_UPPER
+	local MSG  NAME  EXT  FIRST_ONE  CHECK_UPPER
 
 	if [[ ${PRIOR_ALLSKY_STYLE} == "${NEW_STYLE_ALLSKY}" ]]; then
 		# The prior settings file SHOULD be a link to a camera-specific file.
@@ -2172,6 +2213,7 @@ restore_prior_settings_file()
 
 			# Try to create one based on ${PRIOR_SETTINGS_FILE}.
 			if [[ ${PRIOR_CAMERA_TYPE} != "${CAMERA_TYPE}" ]]; then
+# TODO: ? check CAMERA_MODEL
 				MSG+="\nand unable to create one: new Camera Type"
 				MSG+=" (${CAMERA_TYPE} different from prior type (${PRIOR_CAMERA_TYPE})."
 				FORCE_CREATING_DEFAULT_SETTINGS_FILE="true"
@@ -2281,7 +2323,12 @@ restore_prior_files()
 	fi
 
 	if [[ -z ${PRIOR_ALLSKY_DIR} ]]; then
-		get_lat_long	# prompt for them to put in new settings file
+		# prompt for them to put in new settings file
+		if ! get_lat_long ; then
+			MSG="Latitude and/or Longitude not entered"
+			display_msg --log info "${MSG}"
+			CONFIGURATION_NEEDED="${STATUS_NO_LAT_LONG}"
+		fi
 		mkdir -p "${ALLSKY_EXTRA}"		# default permissions is ok
 
 		STATUS_VARIABLES+=( "${FUNCNAME[0]}='true'\n" )
@@ -2361,8 +2408,6 @@ restore_prior_files()
 		cp -ar "${X}" "${MY_OVERLAY_TEMPLATES}"
 	else
 		display_msg --log progress "${ITEM}: ${NOT_RESTORED}"
-		mkdir -p "${MY_OVERLAY_TEMPLATES}"
-		# The directory will get populated as the user creates templates.
 	fi
 
 	# Globals: SENSOR_WIDTH, SENSOR_HEIGHT, FULL_OVERLAY_NAME, SHORT_OVERLAY_NAME, OVERLAY_NAME
@@ -2391,7 +2436,7 @@ restore_prior_files()
 
 		DEST_FILE="${MY_OVERLAY_TEMPLATES}/${OVERLAY_NAME}"
 
-		# Add the metadata for th eoverlay manager
+		# Add the metadata for the overlay manager
 		# shellcheck disable=SC2086
 		jq '. += {"metadata": {
 			"camerabrand": "'${CAMERA_TYPE}'",
@@ -2522,6 +2567,8 @@ restore_prior_files()
 		display_msg --log info "\n${MSG2}\n"
 		echo -e "\n${MSG2}" >> "${POST_INSTALLATION_ACTIONS}"
 	fi
+
+	return 0
 }
 
 
@@ -2536,13 +2583,6 @@ restore_prior_website_files()
 	if [[ ! -f ${ALLSKY_ENV} ]]; then
 		display_msg --log progress "${SPACE}$( basename "${ALLSKY_ENV}" ) (creating)"
 		cp "${REPO_ENV_FILE}" "${ALLSKY_ENV}"
-	fi
-
-#XXXX TODO: do this in makeChanges.sh when they enable the local Website.
-	if [[ ! -f ${ALLSKY_WEBSITE_CONFIGURATION_FILE} ]]; then
-		# No prior config file (this should only happen if there was no prior Website).
-		cp  "${REPO_WEBSITE_CONFIGURATION_FILE}" "${ALLSKY_WEBSITE_CONFIGURATION_FILE}"
-		doV "" "ALLSKY_VERSION" "${WEBSITE_ALLSKY_VERSION}" "text" "${ALLSKY_WEBSITE_CONFIGURATION_FILE}"
 	fi
 
 	ITEM="${SPACE}Local Website files"
@@ -3040,10 +3080,9 @@ install_Python()
 		fi
 
 		PACKAGE="   === Package # ${C} of ${NUM_TO_INSTALL}: [${package}]"
-		# Need indirection since the ${STATUS_NAME} is the variable name and we want its value.
 		STATUS_NAME="${NAME}_${COUNT}"
-		eval "STATUS_VALUE=\${${STATUS_NAME}}"
-		if [[ ${STATUS_VALUE} == "true" ]]; then
+		# Need indirection since the ${STATUS_NAME} is the variable name and we want its value.
+		if [[ ${!STATUS_NAME} == "true" ]]; then
 			display_msg --log progress "${PACKAGE} - already installed."
 			continue
 		fi
@@ -3221,7 +3260,8 @@ sort_settings_file()
 
 	display_msg --logonly info "Sorting settings file '${FILE}'."
 
-	"${ALLSKY_WEBUI}/includes/convertJSON.php" \
+	"${ALLSKY_SCRIPTS}/convertJSON.php" \
+		--convert \
 		--order \
 		--settings-file "${FILE}" \
 		--options-file "${OPTIONS_FILE}" \
@@ -3253,7 +3293,7 @@ check_restored_settings()
 	  	  ${COPIED_PRIOR_FTP_SH} == "true" ]]; then
 		# We restored all the prior settings so no configuration is needed.
 		# However, check if a reboot is needed.
-		CONFIGURATION_NEEDED="false"	# global variable
+		CONFIGURATION_NEEDED="false"
 		if [[ ${REBOOT_NEEDED} == "true" ]]; then
 			IMG="RebootNeeded"
 		else
@@ -3269,7 +3309,7 @@ check_restored_settings()
 		AFTER="installation is complete"
 	fi
 	if [[ ${RESTORED_PRIOR_SETTINGS_FILE} == "false" ]]; then
-		MSG="Default settings were created for your ${CAMERA_TYPE} camera."
+		MSG="Default settings were created for your ${CAMERA_TYPE} ${CAMERA_MODEL} camera."
 		MSG+="\n\nHowever, you must update them by going to the"
 		MSG+=" 'Allsky Settings' page in the WebUI after ${AFTER}."
 		whiptail --title "${TITLE}" --msgbox "${MSG}" 12 "${WT_WIDTH}" 3>&1 1>&2 2>&3
@@ -3794,9 +3834,13 @@ if [[ ${CONFIGURATION_NEEDED} == "false" ]]; then
 	do_allsky_status "ALLSKY_STATUS_NOT_RUNNING"
 	display_image --custom "lime" "Allsky is\nready to start"
 	display_msg --log progress "\nInstallation is done and Allsky is ready to start."
+elif [[ ${CONFIGURATION_NEEDED} != "true" ]]; then
+	exit_installation 0 "${CONFIGURATION_NEEDED}" ""
 else
+	display_image "ConfigurationNeeded"
 	do_allsky_status "ALLSKY_STATUS_SEE_WEBUI"
-	display_msg --log progress "\nInstallation is done" " but Allsky needs to be configured."
+	MSG=" but Allsky needs to be configured before it will start."
+	display_msg --log progress "\nInstallation is done" "${MSG}"
 	display_msg progress "" "Go to the 'Allsky Settings' page of the WebUI to configure Allsky."
 fi
 

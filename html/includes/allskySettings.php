@@ -145,7 +145,9 @@ function DisplayAllskyConfig() {
 	foreach ($options_array as $option) {
 		$name = $option['name'];
 		$optional_array[$name] = toBool(getVariableOrDefault($option, 'optional', "false"));
-		$type_array[$name] = getVariableOrDefault($option, 'type', "");
+		$t = getVariableOrDefault($option, 'type', "");
+		if (substr($t, 0, 7) == "select_") $t = substr($t, 7);
+		$type_array[$name] = $t;
 	}
 
 	if (isset($_POST['save_settings'])) {
@@ -252,6 +254,7 @@ function DisplayAllskyConfig() {
 					$action = getVariableOrDefault($option, 'action', "none");
 					break;
 				}
+
 				if (! $found) {
 					$msg = "Setting '$name' not in options file.";
 					$status->addMessage($msg, 'danger');
@@ -290,14 +293,16 @@ function DisplayAllskyConfig() {
 					} elseif ($name === $cameraNumberName) {
 						$cameraChanged = true;
 						$newCameraNumber = $newValue;
-					} elseif ($name === "latitude" ||
-							  $name === "longitude" ||
-							  $name === "angle" ||
-							  $name === "takedaytimeimages") {
-							$twilightDataChanged = $newValue;
 					} else {
 						// want to know changes other than camera
 						$nonCameraChangesExist = true;
+						if ($name === "latitude" ||
+							  $name === "longitude" ||
+							  $name === "angle" ||
+							  $name === "takedaytimeimages" ||
+							  $name === "takenighttimeimages") {
+							$twilightDataChanged = $newValue;
+						}
 					}
 
 					if ($action == "restart" || $action == "reload") {
@@ -364,7 +369,7 @@ if ($debug && $s != $s_newValue) {
 
 			if ( $ok && ($changesMade || $fromConfiguration) ) {
 				if ($nonCameraChangesExist || $fromConfiguration) {
-					if ($newCameraType !== "" || $newCameraModel !== "" || $newCameraNumber != "") {
+					if ($cameraChanged) {
 						$msg = "If you change <b>Camera Type</b>, <b>Camera Model</b>,";
 						$msg .= " or <b>Camera Number</b>  you cannot change anything else.";
 						$msg .= "<br>You also changed: $nonCameraChanges.";
@@ -388,8 +393,8 @@ if ($debug) {
 }
 							// updateFile() only returns error messages.
 							$msg = updateFile($settings_file, $content, "settings", true);
+echo '<script>console.log("Updated ' . "$settings_file, msg=$msg" . '");</script>';
 							if ($msg === "") {
-echo '<script>console.log("Updated $settings_file");</script>';
 								if ($numSettingsChanges > 0) {
 									$msg = "$numSettingsChanges setting";
 									if ($numSettingsChanges > 1)
@@ -415,7 +420,7 @@ if ($debug) {
 	echo "<pre>"; var_dump($content); echo "</pre>";
 }
 								$msg = updateFile($fileName, $content, "source_settings", true);
-echo '<script>console.log("Updated $fileName");</script>';
+echo "<script>console.log('Updated $fileName');</script>";
 								if ($msg === "") {
 									$msg = "Settings in $fileName saved.";
 									$status->addMessage($msg, 'info');
@@ -524,13 +529,13 @@ echo '<script>console.log("Updated $fileName");</script>';
 						$worked = runCommand($cmd, "", "success", false);
 
 						if ($fromConfiguration) {
-							$cmd = "${CMD}/check_allsky.sh --fromWebUI";
-							echo "<script>console.log('Running: $cmd');</script>";
+							$cmd = "${CMD}/checkAllsky.sh --fromWebUI";
+							echo '<script>console.log("Running: ' . $cmd . '");</script>';
 							exec("$cmd 2>&1", $result, $return_val);
 							if ($result != null) {
 								$result = implode("<br>", $result);
 								// Not worth checking if the update worked.
-								updateFile(ALLSKY_CHECK_ALLSKY_LOG, $result, "check_allsky", true);
+								updateFile(ALLSKY_CHECK_ALLSKY_LOG, $result, "checkAllsky", true);
 	
 								$msg = "<div class='errorMsgBig errorMsgBox center-div center-text'>";
 								$msg .= "Suggested changes to your settings<br>";
@@ -704,6 +709,8 @@ if (false && $debug) { echo "<br>Option $name"; }
 					$status->addMessage($msg, 'danger');
 					continue;
 				}
+				if (substr($type, 0, 7) === "select_")
+					$type = substr($type, 7);
 
 				// Should this setting be displayed?
 				$display = toBool(getVariableOrDefault($option, 'display', "true"));
@@ -978,30 +985,28 @@ if ($debug) { echo "<br>&nbsp; &nbsp; &nbsp; value=$value"; }
 						$style="padding: 5px 5px 7px 8px;";
 					}
 
+					if (toBool(getVariableOrDefault($option, 'readonly', "false")))
+						$readonly = "readonly";
+					else
+						$readonly = "";
+					
 					echo "\n\t<td $cspan valign='middle' style='$style' align='center'>";
 					// TODO: The popup can get in the way of seeing the value a little.
 					// May want to consider having a symbol next to the field that has the popup.
 					echo "<span title='$popup'>";
 // TODO: add percent sign for "percent"
 					if (in_array($type, ["text", "password", "integer",
-								"float", "color", "percent", "readonly"])) {
-						if ($type == "readonly") {
-							$readonly = "readonly";
-							$t = "text";
-						} else {
-							$readonly = "";
-							// Browsers put the up/down arrows for numbers which moves the
-							// numbers to the left, and they don't line up with text.
-							// Plus, they don't accept decimal points in "float".
-							// So, display numbers as text.
-							if ($type == "integer" || $type == "float" ||
-								$type == "percent" || $type == "color") {
-									$type = "text";
-							}
-							$t = $type;
+								"float", "color", "percent"])) {
+						// Browsers put the up/down arrows for numbers which moves the
+						// numbers to the left, and they don't line up with text.
+						// Plus, they don't accept decimal points in "float".
+						// So, display numbers as text.
+						if ($type == "integer" || $type == "float" ||
+							$type == "color" || $type == "percent") {
+								$type = "text";
 						}
 						echo "\n\t\t<input class='form-control boxShadow settingInput settingInputTextNumber'" .
-							" type='$t' $readonly $readonlyForm name='$name' value='$value' >";
+							" type='$type' $readonly $readonlyForm name='$name' value='$value' >";
 
 					} else if ($type == "widetext"){
 						echo "\n\t\t<input class='form-control boxShadow settingInputWidetext'" .
@@ -1110,4 +1115,3 @@ if ($debug) { echo "<br>&nbsp; &nbsp; &nbsp; value=$value"; }
 <?php
 }
 ?>
-
